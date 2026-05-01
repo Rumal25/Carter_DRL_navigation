@@ -1,0 +1,25 @@
+seed: 42
+
+# Stable-Baselines3 PPO for Phase 2 camera-based corridor navigation
+# Observation: 10-dim  |  Action: 2-dim  |  Network: [256, 128] ELU
+
+n_timesteps: !!float 6e5        # total env steps (2x Phase 1)
+policy: MlpPolicy
+n_steps: 32                     # rollout length per env (matches rsl_rl / skrl)
+batch_size: 2048                 # 64 envs x 32 steps = 2048
+gae_lambda: 0.95                 # GAE lambda
+gamma: 0.99                      # discount factor
+n_epochs: 5                      # PPO learning epochs per rollout
+learning_rate: !!float 3e-4      # lower than Phase 1 (1e-3) for stability
+clip_range: !!float 0.2          # PPO epsilon clip
+ent_coef: 0.005                  # entropy coefficient
+vf_coef: 1.0                     # value function coefficient
+max_grad_norm: 1.0
+verbose: 1                       # 1 = print training info to console, 0 = silent
+device: "cuda:0"
+
+policy_kwargs: "dict(
+    activation_fn=nn.ELU,
+    net_arch=[256, 128],
+    squash_output=False,
+)"

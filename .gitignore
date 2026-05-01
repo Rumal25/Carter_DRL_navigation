@@ -1,0 +1,17 @@
+__pycache__/
+*.pyc
+logs/
+runs/
+checkpoints/
+*.pth
+*.pt
+*.onnx
+*.usd
+*.usda
+*.usdc
+datasets/
+*.png
+*.jpg
+.vscode/
+.DS_Store
+Thumbs.db
