@@ -66,5 +66,5 @@ agent:
 
 trainer:
   class: SequentialTrainer
-  timesteps: 300000    # 2× Phase 1 (fewer parallel envs + longer episodes)
+  timesteps: 250000    # 2× Phase 1 (fewer parallel envs + longer episodes)
   environment_info: log

@@ -153,7 +153,7 @@ def heading_penalty_150(
 def wall_collision_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
-    threshold: float = 5.0,
+    threshold: float = 1.0,
 ) -> torch.Tensor:
     """Per-step penalty when the robot's chassis contacts a wall.
 

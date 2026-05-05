@@ -446,7 +446,7 @@ class RewardsCfg:
     # ── Heading penalties ────────────────────────────────────────────────────
     heading_penalty_90 = RewTerm(
         func=mdp.heading_penalty_90,
-        weight=-0.1,
+        weight=-0.3,
         params={"command_name": "pose_command"},
     )
     heading_penalty_150 = RewTerm(
@@ -461,14 +461,14 @@ class RewardsCfg:
         weight=-50.0,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "threshold": 5.0,
+            "threshold": 1.0,
         },
     )
 
     # ── Visual guidance ──────────────────────────────────────────────────────
     on_floor_reward = RewTerm(
         func=mdp.on_floor_reward,
-        weight=0.05,
+        weight=0.00,
         params={
             "camera_cfg": SceneEntityCfg("camera"),
             "min_floor_ratio": 0.60,
@@ -479,7 +479,7 @@ class RewardsCfg:
     upright_penalty = RewTerm(func=mdp.upright_penalty, weight=-1.0)
 
     # ── Termination ──────────────────────────────────────────────────────────
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-50.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=0.0)
 
 
 # ---------------------------------------------------------------------------
