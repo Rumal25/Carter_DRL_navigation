@@ -102,7 +102,7 @@ if not os.path.exists(USD_PATHS[ACTIVE_SHAPE]):
 # Robot spawn position (corridor entrance) relative to the USD environment origin.
 # VERIFY these by loading the USD in Isaac Sim and checking XY coordinates of the entrance.
 ENTRANCE_X = 0.0        # metres — X position at corridor entrance (verified from USD)
-ENTRANCE_Y = 0.0        # metres — Y position at corridor entrance (verified from USD)
+ENTRANCE_Y = -2.5        # metres — Y position at corridor entrance (verified from USD)
 ENTRANCE_YAW = math.pi  # radians — π = facing -Y (into the corridor toward goal at lower Y)
 
 # Z height to spawn the robot above the corridor floor so physics drops it correctly.
@@ -126,7 +126,7 @@ GOAL_Y = 2.0            # metres — Y position of goal dead-end (fixed, verifie
 
 # Small randomization around entrance/goal for robustness (set 0.0 for fully fixed)
 ENTRANCE_RAND_XY  = 0.25           # ± metres of position noise at reset
-ENTRANCE_RAND_YAW = math.pi / 8    # ± radians of heading noise at reset
+ENTRANCE_RAND_YAW = math.pi / 8    # ± radians of heading noise at resetj
 GOAL_RAND_XY      = 0.05           # ± metres of goal Y noise (X is already a full range)
 
 
@@ -443,17 +443,37 @@ class RewardsCfg:
 
     step_penalty = RewTerm(func=mdp.step_penalty, weight=-0.01)
 
+# ── Heading (smooth cosine — replaces binary heading_penalty_90/150) ─────
+    heading_alignment = RewTerm(
+        func=mdp.heading_alignment_reward,
+        weight=0.3,
+        params={"command_name": "pose_command"},
+    )
+
     # ── Heading penalties ────────────────────────────────────────────────────
-    heading_penalty_90 = RewTerm(
-        func=mdp.heading_penalty_90,
-        weight=-0.3,
-        params={"command_name": "pose_command"},
+    # heading_penalty_90 = RewTerm(
+    #     func=mdp.heading_penalty_90,
+    #     weight=-0.3,
+    #     params={"command_name": "pose_command"},
+    # )
+    # heading_penalty_150 = RewTerm(
+    #     func=mdp.heading_penalty_150,
+    #     weight=-5.0,
+    #     params={"command_name": "pose_command"},
+    # )
+
+
+    # ── Wall avoidance ───────────────────────────────────────────────────────
+    # Camera-based early warning (fires before physical contact)
+    wall_proximity = RewTerm(
+        func=mdp.wall_proximity_penalty,
+        weight=-0.2,
+        params={
+            "camera_cfg": SceneEntityCfg("camera"),
+            "threshold": 0.30,
+        },
     )
-    heading_penalty_150 = RewTerm(
-        func=mdp.heading_penalty_150,
-        weight=-5.0,
-        params={"command_name": "pose_command"},
-    )
+
 
     # ── Wall collision ───────────────────────────────────────────────────────
     wall_collision_penalty = RewTerm(
@@ -468,7 +488,7 @@ class RewardsCfg:
     # ── Visual guidance ──────────────────────────────────────────────────────
     on_floor_reward = RewTerm(
         func=mdp.on_floor_reward,
-        weight=0.00,
+        weight=0.05,
         params={
             "camera_cfg": SceneEntityCfg("camera"),
             "min_floor_ratio": 0.60,
@@ -479,7 +499,7 @@ class RewardsCfg:
     upright_penalty = RewTerm(func=mdp.upright_penalty, weight=-1.0)
 
     # ── Termination ──────────────────────────────────────────────────────────
-    termination_penalty = RewTerm(func=mdp.is_terminated, weight=0.0)
+    termination_penalty = RewTerm(func=mdp.is_terminated, weight=-50.0)
 
 
 # ---------------------------------------------------------------------------
@@ -501,7 +521,7 @@ class TerminationsCfg:
         func=mdp.wall_collision_termination,
         params={
             "sensor_cfg": SceneEntityCfg("contact_forces"),
-            "threshold": 5.0,
+            "threshold": 3.0,
         },
     )
 

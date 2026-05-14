@@ -104,6 +104,37 @@ def step_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
     return torch.ones(env.num_envs, device=env.device)
 
 
+def heading_alignment_reward(
+    env: ManagerBasedRLEnv,
+    command_name: str,
+) -> torch.Tensor:
+    """Smooth cosine heading reward — provides a gradient at every heading angle.
+
+    Returns cos(heading_error):
+        heading_b =   0° → +1.0  (perfectly aligned → maximum reward)
+        heading_b =  45° → +0.71
+        heading_b =  90° →  0.0  (sideways → neutral)
+        heading_b = 135° → -0.71
+        heading_b = 180° → -1.0  (reversed → maximum cost)
+
+    WHY this replaces heading_penalty_90 + heading_penalty_150:
+        The old binary penalties gave ZERO gradient in the 0°–90° range.
+        A robot 89° off-target received no signal to keep turning — it could
+        approach left-side goals at a badly misaligned angle and never correct.
+        The cosine reward provides a continuous gradient everywhere, so the
+        policy always knows which direction improves heading.
+
+    Use with weight=+0.3.  Combined effect with distance_closing (weight=+0.01):
+        Aligned + moving toward goal:  +0.3 + 0.01 = +0.31 / step
+        Sideways (90°):                 0.0 + 0.01 = +0.01 / step
+        Reversed + moving away:        -0.3 - 0.01 = -0.31 / step
+
+    Returns shape: [num_envs]
+    """
+    command = env.command_manager.get_command(command_name)
+    heading_b = command[:, 3]
+    return torch.cos(heading_b)
+
 def heading_penalty_90(
     env: ManagerBasedRLEnv,
     command_name: str,
@@ -173,6 +204,41 @@ def wall_collision_penalty(
     h_magnitude = torch.norm(forces_flat[..., :2], dim=-1)  # [N, H*B]
     max_h_force = h_magnitude.max(dim=-1).values            # [N]
     return (max_h_force > threshold).float()
+
+def wall_proximity_penalty(
+    env: ManagerBasedRLEnv,
+    camera_cfg: SceneEntityCfg = SceneEntityCfg("camera"),
+    threshold: float = 0.30,
+) -> torch.Tensor:
+    """Camera-based early warning: penalise when either wall fills >threshold of its half-image.
+
+    This fires BEFORE the chassis physically touches the wall — giving the policy
+    an earlier gradient to steer away.  Complements wall_collision_penalty (which
+    only fires on actual contact).
+
+    The left and right wall ratios are already computed in the observation vector
+    (indices 1 and 2 of camera_image_features).  This function re-derives them
+    from the raw camera so it works independently of the observation pipeline.
+
+    threshold=0.30 means "more than 30% of that image half is blue wall" — close
+    enough to the wall that a steering correction is urgently needed.
+
+    Use with weight=-0.2.  Over a 150-step episode near a wall this costs at most
+    150 × 0.2 = 30 — strong enough to divert the robot, weaker than wall_collision.
+
+    Returns shape: [num_envs]  (0.0 = clear, 1.0 = too close to at least one wall)
+    """
+    camera = env.scene[camera_cfg.name]
+    rgb = camera.data.output.get("rgb")
+    if rgb is None or rgb.numel() == 0:
+        return torch.zeros(env.num_envs, device=env.device)
+
+    seg_mask = segment_image(rgb)                       # [N, H, W]  1=wall 0=floor
+    N, H, W = seg_mask.shape
+    left_wall  = seg_mask[:, :, : W // 2].mean(dim=[1, 2])   # [N]
+    right_wall = seg_mask[:, :, W // 2 :].mean(dim=[1, 2])   # [N]
+    too_close = (left_wall > threshold) | (right_wall > threshold)
+    return too_close.float()
 
 
 def on_floor_reward(
