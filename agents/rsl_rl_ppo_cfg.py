@@ -29,11 +29,11 @@ class CarterCameraNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
     Expect convergence in 2000–4000 iterations.
     """
 
-    num_steps_per_env = 32         # slightly longer rollout per env for corridor tasks
-    max_iterations = 3000          # more iterations needed (fewer parallel envs)
-    save_interval = 200
+    num_steps_per_env = 64         # slightly longer rollout per env for corridor tasks
+    max_iterations = 5000          # more iterations needed (fewer parallel envs)
+    save_interval = 500
     experiment_name = "carter_camera_nav"
-    empirical_normalization = False
+    empirical_normalization = True
 
     policy = RslRlPpoActorCriticCfg(
         init_noise_std=1.0,
@@ -46,7 +46,7 @@ class CarterCameraNavPPORunnerCfg(RslRlOnPolicyRunnerCfg):
         value_loss_coef=1.0,
         use_clipped_value_loss=True,
         clip_param=0.2,
-        entropy_coef=0.005,
+        entropy_coef=0.01,
         num_learning_epochs=5,
         num_mini_batches=4,
         learning_rate=3.0e-4,    # lower LR than Phase 1 (1e-3) for stability with visual obs

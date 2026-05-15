@@ -102,7 +102,7 @@ if not os.path.exists(USD_PATHS[ACTIVE_SHAPE]):
 # Robot spawn position (corridor entrance) relative to the USD environment origin.
 # VERIFY these by loading the USD in Isaac Sim and checking XY coordinates of the entrance.
 ENTRANCE_X = 0.0        # metres — X position at corridor entrance (verified from USD)
-ENTRANCE_Y = -2.5        # metres — Y position at corridor entrance (verified from USD)
+ENTRANCE_Y = 0.0        # metres — Y position at corridor entrance (verified from USD)
 ENTRANCE_YAW = math.pi  # radians — π = facing -Y (into the corridor toward goal at lower Y)
 
 # Z height to spawn the robot above the corridor floor so physics drops it correctly.

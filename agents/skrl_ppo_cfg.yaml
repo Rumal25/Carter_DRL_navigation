@@ -61,8 +61,8 @@ agent:
   experiment:
     directory: "carter_camera_nav"
     experiment_name: ""
-    write_interval: 1000        # print to console every 1000 env-steps (~8 rollouts at 4 envs, ~0.5 rollout at 64 envs)
-    checkpoint_interval: 10000  # save checkpoint every 10000 env-steps
+    write_interval: 2048        # print to console every 1000 env-steps (~8 rollouts at 4 envs, ~0.5 rollout at 64 envs)
+    checkpoint_interval: 20480  # save checkpoint every 10000 env-steps
 
 trainer:
   class: SequentialTrainer
