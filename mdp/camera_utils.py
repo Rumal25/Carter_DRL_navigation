@@ -1,99 +1,88 @@
 # Copyright (c) 2022-2025, The Isaac Lab Project Developers.
 # Copyright (c) 2025, Mateo Bode Nakamura Lab.
 # All rights reserved.
-#
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Shared camera utility functions used by both observations.py and rewards.py.
+"""Shared camera utility functions used by observations.py and rewards.py.
 
-Segmentation pipeline (no neural network needed in simulation):
-    RGB image → color thresholding → binary mask → compact features
+Color conventions (match USD environment materials):
+    Yellow floor:  R=255, G=220, B=0     normalised (1.000, 0.863, 0.000)
+    Blue wall:     R=30,  G=80,  B=200   normalised (0.118, 0.314, 0.784)
 
-Color conventions (match the USD environment materials):
-    Yellow floor:  R > 150, G > 120, B < 100
-    Blue wall:     R < 100, G < 100, B > 150
-    Other:         classified as floor (safe)
-
-Future upgrade path:
-    Replace `segment_image()` with a neural network segmentation model.
-    The `image_features_from_seg()` function and all downstream code remain unchanged.
-    This is the integration point for the semantic segmentation model from the paper.
+FIX: Isaac Lab CameraCfg returns float values in [0.0, 1.0], NOT [0, 255].
+All thresholds use normalised [0, 1] range.
 """
 
 import torch
 
 
 def segment_image(rgb_image: torch.Tensor) -> torch.Tensor:
-    """Convert an RGB camera image to a binary wall/floor segmentation mask.
-
-    Uses simple color thresholding — works perfectly in simulation where
-    colors are exact and reproducible. Replace this function with a neural
-    network segmentation model when deploying on a physical robot.
-
-    Args:
-        rgb_image: Camera output tensor of shape [N, H, W, 3] or [N, H, W, 4].
-                   Values should be in range [0, 255] (uint8 or float).
-
-    Returns:
-        seg_mask: Binary float tensor of shape [N, H, W].
-                  1.0 = wall (blue), 0.0 = floor/other (safe).
-    """
-    # Handle RGBA input (some IsaacLab camera configs return 4 channels)
     rgb = rgb_image[..., :3].float()
+
+    # Always normalise — camera always returns uint8 [0,255]
+    # No conditional needed — just always divide
+    rgb = rgb / 255.0
 
     r = rgb[..., 0]
     g = rgb[..., 1]
     b = rgb[..., 2]
 
-    # Blue wall: low red, low green, high blue
-    is_wall = (r < 100.0) & (g < 100.0) & (b > 150.0)
+    is_wall = (r < 0.40) & (g < 0.50) & (b > 0.55)
 
-    seg_mask = torch.zeros(rgb_image.shape[:3], dtype=torch.float32, device=rgb_image.device)
+    seg_mask = torch.zeros(rgb_image.shape[:3], dtype=torch.float32,
+                           device=rgb_image.device)
     seg_mask[is_wall] = 1.0
-
     return seg_mask
 
 
 def image_features_from_seg(seg_mask: torch.Tensor) -> torch.Tensor:
-    """Extract 4 compact navigation features from a segmentation mask.
-
-    These 4 numbers give the policy enough information to:
-      - Know how dangerous the current view is (wall_ratio)
-      - Know which side has more wall → which way to steer (left/right split)
-      - Know where the safe floor is horizontally (floor_center_x)
+    """Extract 4 compact navigation features from segmentation mask.
 
     Args:
-        seg_mask: Binary float tensor of shape [N, H, W]. 1=wall, 0=floor.
+        seg_mask: [N, H, W] float32.  1=wall, 0=floor
 
     Returns:
-        features: Float tensor of shape [N, 4]:
-            [0] wall_ratio        — fraction of ALL pixels that are wall [0, 1]
-            [1] left_wall_ratio   — wall fraction in LEFT half of image [0, 1]
-            [2] right_wall_ratio  — wall fraction in RIGHT half of image [0, 1]
-            [3] floor_center_x    — horizontal centroid of floor pixels [0, 1]
-                                    0.0 = floor is on the left
-                                    0.5 = floor is centered (safe corridor)
-                                    1.0 = floor is on the right
-
-    Steering intuition:
-        left_wall_ratio >> right_wall_ratio  → wall on left  → steer right
-        right_wall_ratio >> left_wall_ratio  → wall on right → steer left
-        floor_center_x < 0.5               → floor shifted left → steer left
-        floor_center_x > 0.5               → floor shifted right → steer right
+        features: [N, 4]
+            [0] wall_ratio        fraction of ALL pixels = wall
+            [1] left_wall_ratio   wall fraction in LEFT half
+            [2] right_wall_ratio  wall fraction in RIGHT half
+            [3] floor_center_x    horizontal centroid of floor [0=left, 0.5=center, 1=right]
     """
     N, H, W = seg_mask.shape
 
-    # Overall wall fraction
-    wall_ratio = seg_mask.mean(dim=[1, 2])  # [N]
+    wall_ratio       = seg_mask.mean(dim=[1, 2])
+    left_wall_ratio  = seg_mask[:, :, : W // 2].mean(dim=[1, 2])
+    right_wall_ratio = seg_mask[:, :, W // 2 :].mean(dim=[1, 2])
 
-    # Left/right wall fractions (split image vertically at center)
-    left_wall_ratio = seg_mask[:, :, : W // 2].mean(dim=[1, 2])   # [N]
-    right_wall_ratio = seg_mask[:, :, W // 2 :].mean(dim=[1, 2])  # [N]
+    floor        = 1.0 - seg_mask
+    x_coords     = torch.linspace(0.0, 1.0, W, device=seg_mask.device)
+    floor_center_x = (floor * x_coords).sum(dim=[1, 2]) / (
+        floor.sum(dim=[1, 2]) + 1e-6
+    )
 
-    # Horizontal centroid of safe floor pixels (1 - wall = floor)
-    floor = 1.0 - seg_mask  # [N, H, W], 1=floor
-    x_coords = torch.linspace(0.0, 1.0, W, device=seg_mask.device)  # [W]
-    # Weighted sum: where is the floor concentrated horizontally?
-    floor_center_x = (floor * x_coords).sum(dim=[1, 2]) / (floor.sum(dim=[1, 2]) + 1e-6)  # [N]
+    return torch.stack(
+        [wall_ratio, left_wall_ratio, right_wall_ratio, floor_center_x], dim=1
+    )
 
-    return torch.stack([wall_ratio, left_wall_ratio, right_wall_ratio, floor_center_x], dim=1)
+
+# def debug_camera_output(rgb_image: torch.Tensor, step: int, interval: int = 500) -> None:
+#     """Print camera stats every interval steps. Add to observations.py temporarily.
+
+#     Usage:
+#         from .camera_utils import segment_image, image_features_from_seg, debug_camera_output
+#         debug_camera_output(rgb, env.common_step_counter)
+#     """
+#     if step % interval != 0:
+#         return
+#     rgb = rgb_image[..., :3].float()
+#     print(f"\n[CameraDebug] step={step}  shape={rgb_image.shape}  "
+#           f"dtype={rgb_image.dtype}")
+#     print(f"  pixel range : {rgb.min():.4f} to {rgb.max():.4f}")
+#     print(f"  mean RGB    : R={rgb[...,0].mean():.4f}  "
+#           f"G={rgb[...,1].mean():.4f}  B={rgb[...,2].mean():.4f}")
+#     seg = segment_image(rgb_image)
+#     wr  = seg.mean(dim=[1, 2])
+#     print(f"  wall_ratio  : min={wr.min():.4f}  max={wr.max():.4f}  "
+#           f"mean={wr.mean():.4f}")
+#     print(f"  wall detected in {(wr > 0.01).sum().item()} / "
+#           f"{rgb_image.shape[0]} envs\n")

@@ -25,6 +25,7 @@ import torch
 from isaaclab.managers import SceneEntityCfg
 
 from .camera_utils import image_features_from_seg, segment_image
+from .camera_utils import segment_image, image_features_from_seg
 
 if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
@@ -106,10 +107,12 @@ def camera_image_features(
     # Guard: return neutral zeros when camera data is unavailable.
     # floor_center_x = 0.5 means "floor is centered" — safe default behaviour.
     if rgb is None or rgb.numel() == 0:
+     
         zeros = torch.zeros(env.num_envs, 4, device=env.device)
         zeros[:, 3] = 0.5  # floor_center_x neutral = corridor centre
         return zeros
-
+    # from .camera_utils import debug_camera_output
+    # debug_camera_output(rgb, env.common_step_counter, interval=200)
     seg_mask = segment_image(rgb)                  # [N, H, W]
     features = image_features_from_seg(seg_mask)  # [N, 4]
     return features

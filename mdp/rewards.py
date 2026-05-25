@@ -4,31 +4,8 @@
 #
 # SPDX-License-Identifier: BSD-3-Clause
 
-"""Reward functions for Phase 2 camera-based navigation.
-
-Reward design — Morioka Lab paper style (updated 2026-04-29)
--------------------------------------------------------------
-The original tanh position-tracking rewards caused the robot to rush directly
-toward the goal and crash through walls (strong continuous gradient overcame
-the weak wall penalty).  The paper system replaces them with:
-
-  goal_reached_bonus        +100   sparse   robot within 0.5 m of goal
-  distance_closing_reward   +0.01  dense    moving toward goal this step
-  step_penalty              -0.01  dense    every step (time-efficiency pressure)
-  heading_penalty_90        -0.1   dense    facing >90° from goal
-  heading_penalty_150       -5.0   dense    facing >150° from goal (almost reversed)
-  wall_collision_penalty    -50.0  dense    chassis contacts wall (H-force > 5 N)
-  on_floor_reward           +0.05  dense    camera sees >60% yellow floor
-  upright_penalty           -1.0   dense    robot tilting (physics stability)
-  termination_penalty       -50.0  sparse   non-timeout episode end
-
-Key property: wall collision (-50/step) is 5000× stronger than forward progress
-(+0.01/step), so wall shortcuts are never worth it for the policy.
-"""
-
 from __future__ import annotations
 
-import math
 from typing import TYPE_CHECKING
 
 import torch
@@ -41,66 +18,29 @@ if TYPE_CHECKING:
     from isaaclab.envs import ManagerBasedRLEnv
 
 
-# ---------------------------------------------------------------------------
-# Navigation rewards — paper system (Morioka Lab)
-# ---------------------------------------------------------------------------
-
 def goal_reached_bonus(
     env: ManagerBasedRLEnv,
     threshold: float,
     bonus: float,
     command_name: str,
 ) -> torch.Tensor:
-    """Sparse bonus when robot is within threshold metres of the goal.
-
-    Paper value: bonus=100.0.  Returns 0.0 or bonus each step.
-
-    Returns shape: [num_envs]
-    """
     command = env.command_manager.get_command(command_name)
     distance = torch.norm(command[:, :2], dim=1)
     return (distance < threshold).float() * bonus
 
 
-def distance_closing_reward(
+def exponential_distance_reward(
     env: ManagerBasedRLEnv,
     command_name: str,
-    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    scale: float = 2.0,
 ) -> torch.Tensor:
-    """Reward for moving toward the goal this step.
-
-    Returns 1.0 if the robot's velocity has a positive component along the
-    goal direction (body frame), else 0.0.  Use with weight=+0.01.
-
-    This approximates 'closes the distance to goal' from the paper without
-    needing a previous-distance buffer.  The projection onto the goal unit
-    vector ensures only genuine approach motion is rewarded (not sideways drift
-    that happens to reduce distance slightly).
-
-    Returns shape: [num_envs]
-    """
+    """Dense reward: exp(-distance/scale). Strong pull near goal, nonzero gradient far away."""
     command = env.command_manager.get_command(command_name)
-    des_pos_b = command[:, :2]                                         # [N, 2]
-    dist = torch.norm(des_pos_b, dim=1, keepdim=True).clamp(min=1e-6)
-    goal_dir_b = des_pos_b / dist                                      # [N, 2] unit vector to goal
-
-    asset = env.scene[asset_cfg.name]
-    vel_b = asset.data.root_lin_vel_b[:, :2]                           # [N, 2] body-frame velocity
-
-    vel_toward_goal = (vel_b * goal_dir_b).sum(dim=1)                  # [N]
-    return (vel_toward_goal > 0.0).float()
+    distance = torch.norm(command[:, :2], dim=1)
+    return torch.exp(-distance / scale)
 
 
 def step_penalty(env: ManagerBasedRLEnv) -> torch.Tensor:
-    """Constant 1.0 every step.  Use with weight=-0.01.
-
-    Provides a small time-efficiency pressure: the robot loses 0.01 per step
-    it does not reach the goal.  Over a 30-second episode at 15 Hz this costs
-    at most 450 × 0.01 = 4.5 — tiny compared to goal bonus (+100) or wall
-    penalty (-50), so it only breaks ties between equally-rewarded paths.
-
-    Returns shape: [num_envs]
-    """
     return torch.ones(env.num_envs, device=env.device)
 
 
@@ -108,203 +48,102 @@ def heading_alignment_reward(
     env: ManagerBasedRLEnv,
     command_name: str,
 ) -> torch.Tensor:
-    """Smooth cosine heading reward — provides a gradient at every heading angle.
-
-    Returns cos(heading_error):
-        heading_b =   0° → +1.0  (perfectly aligned → maximum reward)
-        heading_b =  45° → +0.71
-        heading_b =  90° →  0.0  (sideways → neutral)
-        heading_b = 135° → -0.71
-        heading_b = 180° → -1.0  (reversed → maximum cost)
-
-    WHY this replaces heading_penalty_90 + heading_penalty_150:
-        The old binary penalties gave ZERO gradient in the 0°–90° range.
-        A robot 89° off-target received no signal to keep turning — it could
-        approach left-side goals at a badly misaligned angle and never correct.
-        The cosine reward provides a continuous gradient everywhere, so the
-        policy always knows which direction improves heading.
-
-    Use with weight=+0.3.  Combined effect with distance_closing (weight=+0.01):
-        Aligned + moving toward goal:  +0.3 + 0.01 = +0.31 / step
-        Sideways (90°):                 0.0 + 0.01 = +0.01 / step
-        Reversed + moving away:        -0.3 - 0.01 = -0.31 / step
-
-    Returns shape: [num_envs]
-    """
+    """cos(heading_error): +1 facing goal, 0 sideways, -1 reversed."""
     command = env.command_manager.get_command(command_name)
     heading_b = command[:, 3]
     return torch.cos(heading_b)
 
-def heading_penalty_90(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-) -> torch.Tensor:
-    """Penalty when robot faces more than 90° away from the goal.
-
-    Returns 1.0 if |heading_b| > π/2, else 0.0.  Use with weight=-0.1.
-
-    heading_b = 0   → facing goal directly → no penalty
-    heading_b = π/2 → sideways to goal    → penalty starts
-    heading_b = π   → facing away         → penalty + heading_penalty_150 fires
-
-    Combined effect with heading_penalty_150:
-        0° – 90°:   no heading cost
-        90° – 150°: -0.1 per step
-        150° – 180°: -0.1 - 5.0 = -5.1 per step
-
-    Returns shape: [num_envs]
-    """
-    command = env.command_manager.get_command(command_name)
-    heading_b = command[:, 3]
-    return (heading_b.abs() > math.pi / 2).float()
-
-
-def heading_penalty_150(
-    env: ManagerBasedRLEnv,
-    command_name: str,
-) -> torch.Tensor:
-    """Strong penalty when robot faces more than 150° away from the goal.
-
-    Returns 1.0 if |heading_b| > 5π/6 (150°), else 0.0.  Use with weight=-5.0.
-
-    Fires only in the narrow 30° window where the robot is nearly reversed.
-    This strongly discourages the policy from learning to go backward.
-
-    Returns shape: [num_envs]
-    """
-    command = env.command_manager.get_command(command_name)
-    heading_b = command[:, 3]
-    return (heading_b.abs() > 5.0 * math.pi / 6.0).float()
-
-
-# ---------------------------------------------------------------------------
-# Wall avoidance + visual safety
-# ---------------------------------------------------------------------------
 
 def wall_collision_penalty(
     env: ManagerBasedRLEnv,
     sensor_cfg: SceneEntityCfg = SceneEntityCfg("contact_forces"),
-    threshold: float = 1.0,
+    threshold: float = 0.2,
 ) -> torch.Tensor:
-    """Per-step penalty when the robot's chassis contacts a wall.
+    """Binary penalty when filtered wall contact force exceeds threshold.
 
-    Only HORIZONTAL (X, Y) force components are checked — prevents false
-    penalties from floor-landing impacts (which are purely vertical / Z).
-
-    Paper value: -50.0 per collision.  Since wall_collision_termination ends
-    the episode immediately, this fires at most once per episode, giving a
-    total wall cost of weight × 1.0 = -50.0, exactly matching the paper.
-
-    Returns shape: [num_envs]  (0.0 = no collision, 1.0 = collision)
+    Uses force_matrix_w_history which only counts contacts with the filtered
+    wall prims (floor contacts excluded).
     """
-    contact_sensor = env.scene[sensor_cfg.name]
-    net_forces = contact_sensor.data.net_forces_w_history   # [N, H, B, 3]
-    N = net_forces.shape[0]
-    forces_flat = net_forces.view(N, -1, 3)                 # [N, H*B, 3]
-    h_magnitude = torch.norm(forces_flat[..., :2], dim=-1)  # [N, H*B]
-    max_h_force = h_magnitude.max(dim=-1).values            # [N]
-    return (max_h_force > threshold).float()
+    sensor = env.scene[sensor_cfg.name]
+    N = env.num_envs
+    net = sensor.data.net_forces_w_history          # [N, H, B, 3]
+    magnitudes = torch.norm(
+        net.view(N, -1, 3), dim=-1
+    ).max(dim=-1).values                            # [N]
+    return (magnitudes > threshold).float()
 
-def wall_proximity_penalty(
+
+# def wall_approach_penalty(
+#     env: ManagerBasedRLEnv,
+#     camera_cfg: SceneEntityCfg = SceneEntityCfg("camera"),
+#     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+#     wall_threshold: float = 0.35,
+#     vel_threshold: float = 0.1,
+# ) -> torch.Tensor:
+#     """Pre-collision penalty: fires when robot actively moves toward a visible wall.
+
+#     Combines camera wall detection with robot velocity direction. Only fires when
+#     BOTH a wall is visible on a given side AND the robot is moving toward it.
+#     This gives a training signal BEFORE physical contact so the policy learns
+#     to use camera observations to anticipate and avoid obstacles.
+
+#     Lateral walls use wall_threshold; front wall uses 1.5x threshold to avoid
+#     penalizing normal forward navigation through the corridor.
+#     """
+#     camera = env.scene[camera_cfg.name]
+#     rgb = camera.data.output.get("rgb")
+#     if rgb is None or rgb.numel() == 0:
+#         return torch.zeros(env.num_envs, device=env.device)
+
+#     seg_mask = segment_image(rgb)   # [N, H, W]
+#     N, H, W = seg_mask.shape
+#     W3 = W // 3
+
+#     left_wall   = seg_mask[:, :, :W3].mean(dim=[1, 2])
+#     center_wall = seg_mask[:, :, W3:2*W3].mean(dim=[1, 2])
+#     right_wall  = seg_mask[:, :, 2*W3:].mean(dim=[1, 2])
+
+#     asset = env.scene[asset_cfg.name]
+#     v_fwd = asset.data.root_lin_vel_b[:, 0]   # positive = forward
+#     v_lat = asset.data.root_lin_vel_b[:, 1]   # positive = left
+
+#     approaching_front = (center_wall > wall_threshold * 1.5) & (v_fwd > vel_threshold)
+#     approaching_left  = (left_wall   > wall_threshold)       & (v_lat > vel_threshold)
+#     approaching_right = (right_wall  > wall_threshold)       & (v_lat < -vel_threshold)
+
+#     return (approaching_front | approaching_left | approaching_right).float()
+
+
+def non_success_termination(env: ManagerBasedRLEnv) -> torch.Tensor:
+    """Penalty for failure terminations only — does NOT fire on goal-reached or timeout."""
+    terminated = env.termination_manager.terminated
+    timed_out  = env.termination_manager.time_outs
+    # command = env.command_manager.get_command("pose_command")
+    # distance = torch.norm(command[:, :2], dim=1)
+    # at_goal  = distance < 0.6
+    failure  = terminated & ~timed_out 
+    return failure.float()
+
+
+def backward_velocity_penalty(
     env: ManagerBasedRLEnv,
-    camera_cfg: SceneEntityCfg = SceneEntityCfg("camera"),
-    threshold: float = 0.30,
+    asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
+    max_backward_vel: float = 0.05,
 ) -> torch.Tensor:
-    """Camera-based early warning: penalise when either wall fills >threshold of its half-image.
-
-    This fires BEFORE the chassis physically touches the wall — giving the policy
-    an earlier gradient to steer away.  Complements wall_collision_penalty (which
-    only fires on actual contact).
-
-    The left and right wall ratios are already computed in the observation vector
-    (indices 1 and 2 of camera_image_features).  This function re-derives them
-    from the raw camera so it works independently of the observation pipeline.
-
-    threshold=0.30 means "more than 30% of that image half is blue wall" — close
-    enough to the wall that a steering correction is urgently needed.
-
-    Use with weight=-0.2.  Over a 150-step episode near a wall this costs at most
-    150 × 0.2 = 30 — strong enough to divert the robot, weaker than wall_collision.
-
-    Returns shape: [num_envs]  (0.0 = clear, 1.0 = too close to at least one wall)
-    """
-    camera = env.scene[camera_cfg.name]
-    rgb = camera.data.output.get("rgb")
-    if rgb is None or rgb.numel() == 0:
-        return torch.zeros(env.num_envs, device=env.device)
-
-    seg_mask = segment_image(rgb)                       # [N, H, W]  1=wall 0=floor
-    N, H, W = seg_mask.shape
-    left_wall  = seg_mask[:, :, : W // 2].mean(dim=[1, 2])   # [N]
-    right_wall = seg_mask[:, :, W // 2 :].mean(dim=[1, 2])   # [N]
-    too_close = (left_wall > threshold) | (right_wall > threshold)
-    return too_close.float()
-
-
-def on_floor_reward(
-    env: ManagerBasedRLEnv,
-    camera_cfg: SceneEntityCfg = SceneEntityCfg("camera"),
-    min_floor_ratio: float = 0.60,
-) -> torch.Tensor:
-    """Small bonus when the camera view shows enough yellow floor.
-
-    Encourages the robot to stay in the corridor center rather than hugging
-    walls.  Weight reduced to 0.05 (from 0.1) so it does not compete with
-    the heading or distance rewards.
-
-    Returns shape: [num_envs]  (0.0 or 1.0)
-    """
-    camera = env.scene[camera_cfg.name]
-    rgb = camera.data.output["rgb"]
-    seg_mask = segment_image(rgb)
-    floor_ratio = 1.0 - seg_mask.mean(dim=[1, 2])
-    return (floor_ratio >= min_floor_ratio).float()
+    """Penalise backward motion beyond dead-band. Camera must face direction of travel."""
+    asset = env.scene[asset_cfg.name]
+    v_fwd = asset.data.root_lin_vel_b[:, 0]
+    return torch.clamp(-v_fwd - max_backward_vel, min=0.0)
 
 
 def upright_penalty(
     env: ManagerBasedRLEnv,
     asset_cfg: SceneEntityCfg = SceneEntityCfg("robot"),
 ) -> torch.Tensor:
-    """Penalty proportional to how far the robot has tilted from upright.
-
-    Returns 0.0 when perfectly upright, up to 2.0 when completely sideways.
-    Provides a dense gradient before robot_fell_over termination fires.
-    Use with weight=-1.0.
-
-    Returns shape: [num_envs]
-    """
+    """Penalty proportional to robot tilt from upright. Returns [0, 2]."""
     asset = env.scene[asset_cfg.name]
-    quat_w = asset.data.root_quat_w   # [N, 4]  (w, x, y, z)
+    quat_w = asset.data.root_quat_w
     x = quat_w[:, 1]
     y = quat_w[:, 2]
     z_up = 1.0 - 2.0 * (x * x + y * y)
     return (1.0 - z_up).clamp(0.0, 2.0)
-
-
-# ---------------------------------------------------------------------------
-# Legacy functions kept for reference — NOT used in current RewardsCfg
-# ---------------------------------------------------------------------------
-
-def position_command_error_tanh(env, std, command_name):
-    """DEPRECATED — caused wall-rushing. Replaced by distance_closing_reward."""
-    command = env.command_manager.get_command(command_name)
-    distance = torch.norm(command[:, :2], dim=1)
-    return 1 - torch.tanh(distance / std)
-
-
-def heading_command_error_abs(env, command_name):
-    """DEPRECATED — replaced by heading_penalty_90 + heading_penalty_150."""
-    command = env.command_manager.get_command(command_name)
-    return command[:, 3].abs()
-
-
-def forward_velocity_reward(env, asset_cfg=SceneEntityCfg("robot")):
-    """DEPRECATED — replaced by distance_closing_reward + step_penalty."""
-    asset = env.scene[asset_cfg.name]
-    return torch.clamp(asset.data.root_lin_vel_b[:, 0], min=0.0)
-
-
-def angular_velocity_penalty(env, asset_cfg=SceneEntityCfg("robot")):
-    """DEPRECATED — heading penalties now handle turn behavior."""
-    asset = env.scene[asset_cfg.name]
-    return asset.data.root_ang_vel_w[:, 2].abs()
